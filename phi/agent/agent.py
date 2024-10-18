@@ -1183,8 +1183,8 @@ class Agent(BaseModel):
             model=model,
             description="You are a meticulous and thoughtful assistant that solves complex problems by reasoning through them step-by-step.",
             instructions=[
-                "First - Analyze the Input: Carefully examine the given input and develop a logical plan to address it.",
-                "Step-by-Step Plan: Work through your plan, executing any tools as needed. For each step, provide:\n"
+                "First - Analyze the task: carefully examine the task and develop multiple step-by-step plans to solve it.",
+                "Then work through each plans step-by-step, executing any tools as needed. For each step, provide:\n"
                 "  1. Title: A clear, concise title that encapsulates the step's main focus or objective.\n"
                 "  2. Action: Describe the action you will take in the first person (e.g., 'I will...').\n"
                 "  3. Result: Execute the action by running any necessary tools or providing an answer. Summarize the outcome.\n"
@@ -1203,6 +1203,11 @@ class Agent(BaseModel):
                 "  - If next_action is continue, proceed to the next step in your analysis.\n"
                 "  - If next_action is validate, validate the result of the action and provide the final answer.\n"
                 "  - If next_action is final_answer, stop reasoning.",
+                "Remember - If next_action is validate, you must validate your result\n"
+                "  - Ensure your result solves the original task.\n"
+                "  - Validate your result using any necessary tools or methods.\n"
+                "  - If there is another method to solve the task, use that to validate the result.\n"
+                "  - If the result is incorrect, correct it and provide the final answer.",
                 "Ensure your analysis is:\n"
                 "  - Complete: Validate results and run all necessary tools.\n"
                 "  - Comprehensive: Consider multiple angles and potential outcomes.\n"
@@ -2554,16 +2559,34 @@ class Agent(BaseModel):
             reasoning_steps: List[ReasoningStep] = []
             with Live() as live_log:
                 status = Status("Thinking...", spinner="aesthetic", speed=2.0, refresh_per_second=10)
+                live_log.update(status)
                 response_timer = Timer()
                 response_timer.start()
+                # Flag which indicates if the panels should be rendered
                 render = False
+                # Panels to be rendered
+                panels = [status]
+                # First render the message panel if the message is not None
+                if message and show_message:
+                    render = True
+                    # Convert message to a panel
+                    message_content = get_text_from_message(message)
+                    message_panel = self.create_panel(
+                        content=Text(message_content, style="green"),
+                        title="Message",
+                        border_style="cyan",
+                    )
+                    panels.append(message_panel)
+                if render:
+                    live_log.update(Group(*panels))
+
                 for resp in self.run(message=message, messages=messages, stream=True, **kwargs):
                     if isinstance(resp, RunResponse) and isinstance(resp.content, str):
                         if resp.event == RunEvent.run_response:
                             _response_content += resp.content
                         if resp.extra_data is not None and resp.extra_data.reasoning_steps is not None:
                             reasoning_steps = resp.extra_data.reasoning_steps
-                    response_content = Markdown(_response_content) if self.markdown else _response_content
+                    response_content_stream = Markdown(_response_content) if self.markdown else _response_content
 
                     panels = [status]
 
@@ -2577,6 +2600,8 @@ class Agent(BaseModel):
                             border_style="cyan",
                         )
                         panels.append(message_panel)
+                    if render:
+                        live_log.update(Group(*panels))
 
                     if len(reasoning_steps) > 0 and show_reasoning:
                         render = True
@@ -2604,17 +2629,18 @@ class Agent(BaseModel):
                                 content=step_content, title=f"Reasoning step {i}", border_style="green"
                             )
                             panels.append(reasoning_panel)
+                    if render:
+                        live_log.update(Group(*panels))
 
                     if len(_response_content) > 0:
                         render = True
                         # Create panel for response
                         response_panel = self.create_panel(
-                            content=response_content,
+                            content=response_content_stream,
                             title=f"Response ({response_timer.elapsed:.1f}s)",
                             border_style="blue",
                         )
                         panels.append(response_panel)
-
                     if render:
                         live_log.update(Group(*panels))
                 response_timer.stop()
@@ -2625,15 +2651,14 @@ class Agent(BaseModel):
         else:
             with Live() as live_log:
                 status = Status("Thinking...", spinner="aesthetic", speed=2.0, refresh_per_second=10)
+                live_log.update(status)
                 response_timer = Timer()
                 response_timer.start()
-                live_log.update(status)
-
-                run_response = self.run(message=message, messages=messages, stream=False, **kwargs)
-                response_timer.stop()
-
-                panels = []
-
+                # Flag which indicates if the panels should be rendered
+                render = False
+                # Panels to be rendered
+                panels = [status]
+                # First render the message panel if the message is not None
                 if message and show_message:
                     # Convert message to a panel
                     message_content = get_text_from_message(message)
@@ -2643,6 +2668,12 @@ class Agent(BaseModel):
                         border_style="cyan",
                     )
                     panels.append(message_panel)
+                if render:
+                    live_log.update(Group(*panels))
+
+                # Run the agent
+                run_response = self.run(message=message, messages=messages, stream=False, **kwargs)
+                response_timer.stop()
 
                 reasoning_steps = []
                 if (
@@ -2653,39 +2684,58 @@ class Agent(BaseModel):
                     reasoning_steps = run_response.extra_data.reasoning_steps
 
                 if len(reasoning_steps) > 0 and show_reasoning:
+                    render = True
                     # Create panels for reasoning steps
                     for i, step in enumerate(reasoning_steps, 1):
                         step_content = Text.assemble(
                             (f"{step.title}\n", "bold"),
                             (step.action or "", "dim"),
                         )
+                        if show_full_reasoning:
+                            step_content.append("\n")
+                            if step.result:
+                                step_content.append(
+                                    Text.from_markup(f"\n[bold]Result:[/bold] {step.result}", style="dim")
+                                )
+                            if step.reasoning:
+                                step_content.append(
+                                    Text.from_markup(f"\n[bold]Reasoning:[/bold] {step.reasoning}", style="dim")
+                                )
+                            if step.confidence is not None:
+                                step_content.append(
+                                    Text.from_markup(f"\n[bold]Confidence:[/bold] {step.confidence}", style="dim")
+                                )
                         reasoning_panel = self.create_panel(
                             content=step_content, title=f"Reasoning step {i}", border_style="green"
                         )
                         panels.append(reasoning_panel)
+                    if render:
+                        live_log.update(Group(*panels))
 
-                response_content = ""
+                response_content_batch: Union[str, JSON, Markdown] = ""
                 if isinstance(run_response, RunResponse):
                     if isinstance(run_response.content, str):
-                        response_content = (
+                        response_content_batch = (
                             Markdown(run_response.content)
                             if self.markdown
                             else run_response.get_content_as_string(indent=4)
                         )
                     elif self.response_model is not None and isinstance(run_response.content, BaseModel):
                         try:
-                            response_content = JSON(run_response.content.model_dump_json(exclude_none=True), indent=2)
+                            response_content_batch = JSON(
+                                run_response.content.model_dump_json(exclude_none=True), indent=2
+                            )
                         except Exception as e:
                             logger.warning(f"Failed to convert response to JSON: {e}")
                     else:
                         try:
-                            response_content = JSON(json.dumps(run_response.content), indent=4)
+                            response_content_batch = JSON(json.dumps(run_response.content), indent=4)
                         except Exception as e:
                             logger.warning(f"Failed to convert response to JSON: {e}")
 
                 # Create panel for response
                 response_panel = self.create_panel(
-                    content=response_content,
+                    content=response_content_batch,
                     title=f"Response ({response_timer.elapsed:.1f}s)",
                     border_style="blue",
                 )
@@ -2725,16 +2775,34 @@ class Agent(BaseModel):
             reasoning_steps: List[ReasoningStep] = []
             with Live() as live_log:
                 status = Status("Thinking...", spinner="aesthetic", speed=2.0, refresh_per_second=10)
+                live_log.update(status)
                 response_timer = Timer()
                 response_timer.start()
+                # Flag which indicates if the panels should be rendered
                 render = False
+                # Panels to be rendered
+                panels = [status]
+                # First render the message panel if the message is not None
+                if message and show_message:
+                    render = True
+                    # Convert message to a panel
+                    message_content = get_text_from_message(message)
+                    message_panel = self.create_panel(
+                        content=Text(message_content, style="green"),
+                        title="Message",
+                        border_style="cyan",
+                    )
+                    panels.append(message_panel)
+                if render:
+                    live_log.update(Group(*panels))
+
                 async for resp in await self.arun(message=message, messages=messages, stream=True, **kwargs):
                     if isinstance(resp, RunResponse) and isinstance(resp.content, str):
                         if resp.event == RunEvent.run_response:
                             _response_content += resp.content
                         if resp.extra_data is not None and resp.extra_data.reasoning_steps is not None:
                             reasoning_steps = resp.extra_data.reasoning_steps
-                    response_content = Markdown(_response_content) if self.markdown else _response_content
+                    response_content_stream = Markdown(_response_content) if self.markdown else _response_content
 
                     panels = [status]
 
@@ -2748,6 +2816,8 @@ class Agent(BaseModel):
                             border_style="cyan",
                         )
                         panels.append(message_panel)
+                    if render:
+                        live_log.update(Group(*panels))
 
                     if len(reasoning_steps) > 0 and (show_reasoning or show_full_reasoning):
                         render = True
@@ -2775,17 +2845,18 @@ class Agent(BaseModel):
                                 content=step_content, title=f"Reasoning step {i}", border_style="green"
                             )
                             panels.append(reasoning_panel)
+                    if render:
+                        live_log.update(Group(*panels))
 
                     if len(_response_content) > 0:
                         render = True
                         # Create panel for response
                         response_panel = self.create_panel(
-                            content=response_content,
+                            content=response_content_stream,
                             title=f"Response ({response_timer.elapsed:.1f}s)",
                             border_style="blue",
                         )
                         panels.append(response_panel)
-
                     if render:
                         live_log.update(Group(*panels))
                 response_timer.stop()
@@ -2796,15 +2867,14 @@ class Agent(BaseModel):
         else:
             with Live() as live_log:
                 status = Status("Thinking...", spinner="aesthetic", speed=2.0, refresh_per_second=10)
+                live_log.update(status)
                 response_timer = Timer()
                 response_timer.start()
-                live_log.update(status)
-
-                run_response = await self.arun(message=message, messages=messages, stream=False, **kwargs)
-                response_timer.stop()
-
-                panels = []
-
+                # Flag which indicates if the panels should be rendered
+                render = False
+                # Panels to be rendered
+                panels = [status]
+                # First render the message panel if the message is not None
                 if message and show_message:
                     # Convert message to a panel
                     message_content = get_text_from_message(message)
@@ -2814,6 +2884,12 @@ class Agent(BaseModel):
                         border_style="cyan",
                     )
                     panels.append(message_panel)
+                if render:
+                    live_log.update(Group(*panels))
+
+                # Run the agent
+                run_response = await self.arun(message=message, messages=messages, stream=False, **kwargs)
+                response_timer.stop()
 
                 reasoning_steps = []
                 if (
@@ -2824,39 +2900,58 @@ class Agent(BaseModel):
                     reasoning_steps = run_response.extra_data.reasoning_steps
 
                 if len(reasoning_steps) > 0 and show_reasoning:
+                    render = True
                     # Create panels for reasoning steps
                     for i, step in enumerate(reasoning_steps, 1):
                         step_content = Text.assemble(
                             (f"{step.title}\n", "bold"),
                             (step.action or "", "dim"),
                         )
+                        if show_full_reasoning:
+                            step_content.append("\n")
+                            if step.result:
+                                step_content.append(
+                                    Text.from_markup(f"\n[bold]Result:[/bold] {step.result}", style="dim")
+                                )
+                            if step.reasoning:
+                                step_content.append(
+                                    Text.from_markup(f"\n[bold]Reasoning:[/bold] {step.reasoning}", style="dim")
+                                )
+                            if step.confidence is not None:
+                                step_content.append(
+                                    Text.from_markup(f"\n[bold]Confidence:[/bold] {step.confidence}", style="dim")
+                                )
                         reasoning_panel = self.create_panel(
                             content=step_content, title=f"Reasoning step {i}", border_style="green"
                         )
                         panels.append(reasoning_panel)
+                    if render:
+                        live_log.update(Group(*panels))
 
-                response_content = ""
+                response_content_batch: Union[str, JSON, Markdown] = ""
                 if isinstance(run_response, RunResponse):
                     if isinstance(run_response.content, str):
-                        response_content = (
+                        response_content_batch = (
                             Markdown(run_response.content)
                             if self.markdown
                             else run_response.get_content_as_string(indent=4)
                         )
                     elif self.response_model is not None and isinstance(run_response.content, BaseModel):
                         try:
-                            response_content = JSON(run_response.content.model_dump_json(exclude_none=True), indent=2)
+                            response_content_batch = JSON(
+                                run_response.content.model_dump_json(exclude_none=True), indent=2
+                            )
                         except Exception as e:
                             logger.warning(f"Failed to convert response to JSON: {e}")
                     else:
                         try:
-                            response_content = JSON(json.dumps(run_response.content), indent=4)
+                            response_content_batch = JSON(json.dumps(run_response.content), indent=4)
                         except Exception as e:
                             logger.warning(f"Failed to convert response to JSON: {e}")
 
                 # Create panel for response
                 response_panel = self.create_panel(
-                    content=response_content,
+                    content=response_content_batch,
                     title=f"Response ({response_timer.elapsed:.1f}s)",
                     border_style="blue",
                 )
